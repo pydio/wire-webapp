@@ -39,6 +39,7 @@ import {useSingleInstance} from 'src/script/hooks/useSingleInstance';
 import {useUserPropertyValue} from 'src/script/hooks/useUserProperty';
 import type {Translate} from 'Util/localizerUtil';
 
+import {getOtherInstanceAction} from './getOtherInstanceAction';
 import {useAccentColor} from './hooks/useAccentColor';
 import {useTheme} from './hooks/useTheme';
 
@@ -165,14 +166,19 @@ export const AppContainer = (properties: AppProps) => {
     };
   }, [doesApplicationNeedForceReload, fireAndForgetInvoker, isFeatureToggleEnabled, mainView, translate, wallClock]);
 
-  if (hasOtherInstance) {
-    // Automatically sign out the user if the user has multiple tabs open
-    if (enableAutoLogin) {
-      amplify.publish(WebAppEvents.LIFECYCLE.SIGN_OUT, SIGN_OUT_REASON.MULTIPLE_TABS);
-    } else {
-      app.repository.lifeCycle.redirectToLogin(SIGN_OUT_REASON.MULTIPLE_TABS);
-    }
+  const otherInstanceAction = getOtherInstanceAction({
+    hasOtherInstance,
+    isLoggingOut: app.repository.lifeCycle.getIsLoggingOut(),
+    isAutoLoginEnabled: enableAutoLogin,
+  });
 
+  if (otherInstanceAction === 'sign-out') {
+    amplify.publish(WebAppEvents.LIFECYCLE.SIGN_OUT, SIGN_OUT_REASON.MULTIPLE_TABS);
+    return null;
+  }
+
+  if (otherInstanceAction === 'redirect-to-login') {
+    app.repository.lifeCycle.redirectToLogin(SIGN_OUT_REASON.MULTIPLE_TABS);
     return null;
   }
 
