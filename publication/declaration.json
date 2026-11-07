@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "wire.component-release/v1alpha2",
+  "component": "webapp",
+  "version": "0.50.1",
+  "summary": "First 0.50 release through the standard release process, with two fixes. Nothing to do before upgrading.",
+  "upgrade_from": ">=0.50.0",
+  "changes": [
+    {
+      "kind": "fixed",
+      "description": "Uploads of files with non-ASCII characters in their name are no longer truncated.",
+      "breaking": false,
+      "links": [
+        "https://github.com/wireapp/wire-webapp/pull/22893",
+        "https://github.com/pydio/wire-webapp/commit/f55ded426b"
+      ]
+    },
+    {
+      "kind": "fixed",
+      "description": "When this device is removed from the account, the login page says so again instead of sometimes showing no reason.",
+      "breaking": false,
+      "links": [
+        "https://github.com/wireapp/wire-webapp/pull/22799",
+        "https://github.com/pydio/wire-webapp/commit/a828877919"
+      ]
+    }
+  ],
+  "migrations": [],
+  "configuration": []
+}
