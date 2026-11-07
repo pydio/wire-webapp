@@ -10,7 +10,7 @@ on:
     branches: [main, dev, release/*, maintenance/*]
 
   push:
-    branches: [dev, release/*]
+    branches: [dev]
 
 concurrency:
   group: ci-${{ github.ref }}
