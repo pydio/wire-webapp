@@ -18,7 +18,7 @@
  */
 
 import {renderHook} from '@testing-library/react';
-import {createDeterministicClock} from '@enormora/clock/deterministic-clock';
+import {createDeterministicWallClock} from '@enormora/wall-clock/deterministic-wall-clock';
 import {act} from 'react';
 import {Maybe} from 'true-myth';
 
@@ -50,7 +50,7 @@ function createInMemoryStorage(): InMemoryStorage {
 
 function renderRegisteredSingleInstance() {
   const storage = createInMemoryStorage();
-  const clock = createDeterministicClock({initialUnixEpochMicroseconds: 0n});
+  const clock = createDeterministicWallClock({initialCurrentTimestampInMilliseconds: 0});
   const useSingleInstance = createUseSingleInstance({
     createInstanceId: () => {
       return 'current-tab';
@@ -59,7 +59,7 @@ function renderRegisteredSingleInstance() {
       return false;
     },
     singleInstanceStorage: storage,
-    clock,
+    wallClock: clock,
   });
 
   const {result} = renderHook(() => {
