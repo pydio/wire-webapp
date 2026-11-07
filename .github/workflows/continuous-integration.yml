@@ -341,7 +341,7 @@ jobs:
   pr-package-docker-image:
     runs-on: ubuntu-24.04
     name: PR package / Docker image publishing
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.repository == 'wireapp/wire-webapp' }}
     needs:
       - generated-artifacts
       - build-libraries
