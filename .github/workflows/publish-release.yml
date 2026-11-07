@@ -1,0 +1,291 @@
+name: Publish release
+
+run-name: Publish v${{ inputs.version }} (by @${{ github.actor }})
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to publish, as computed by prepare-release (without v)'
+        type: string
+        required: true
+      release_id:
+        description: 'Numeric id of the draft GitHub Release created by prepare-release'
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (X.Y.Z or X.Y.Z-<channel>.N): recovery path, resolves the draft by tag_name'
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: publish-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  COMPONENT: webapp
+  CHART_NAME: wire-webapp
+  QUAY_ROBOT: wire+gha_wire-webapp
+  HELM_VERSION: v3.22.0
+
+jobs:
+  publish:
+    name: Publish
+    environment:
+      name: release-publication
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ inputs.version }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Validate inputs
+        uses: wireapp/wire-rm-actions/release-inputs@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: publish
+          version: ${{ inputs.version }}
+          release-id: ${{ inputs.release_id }}
+
+      - name: Resolve draft release
+        id: draft
+        uses: wireapp/wire-rm-actions/draft-release@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: resolve
+          version: ${{ inputs.version }}
+          release-id: ${{ inputs.release_id }}
+          download: manifest-files
+          asset-dir: ${{ runner.temp }}/candidate
+
+      - name: Check the manifest source
+        id: manifest_source
+        env:
+          MANIFEST: ${{ steps.draft.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          source_ref=$(jq -r '.source.ref // empty' "$MANIFEST")
+          if [[ ! "$source_ref" =~ ^(dev|release/[0-9]+\.[0-9]+)$ ]]; then
+            echo "error: manifest source.ref '$source_ref' is not a releasable branch" >&2
+            exit 1
+          fi
+          echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"
+          echo "Manifest source branch ${source_ref}"
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ steps.manifest_source.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the candidate assets against the manifest
+        id: manifest
+        uses: wireapp/wire-rm-actions/release-manifest@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: verify
+          manifest: ${{ steps.draft.outputs.manifest }}
+          asset-dir: ${{ steps.draft.outputs.asset-dir }}
+          version: ${{ inputs.version }}
+          source-commit: ${{ steps.draft.outputs.target-commitish }}
+          check-source-branch: true
+
+      - name: Log in to quay.io with the OIDC token of the run
+        id: quay
+        uses: wireapp/wire-rm-actions/quay-login@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          robot: ${{ env.QUAY_ROBOT }}
+
+      - name: Install crane
+        run: |
+          set -euo pipefail
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Promote the image (crane tag by digest)
+        id: image
+        uses: wireapp/wire-rm-actions/promote-image@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          repository: ${{ steps.manifest.outputs.image-repository }}
+          digest: ${{ steps.manifest.outputs.image-digest }}
+          tag: ${{ steps.manifest.outputs.image-tag }}
+
+      - name: Chart channel of the candidate
+        id: channel
+        env:
+          CHART_REPOSITORY: ${{ steps.manifest.outputs.chart-repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CHART_REPOSITORY" =~ ^oci://quay\.io/wire/charts/(dev|stable)/${CHART_NAME}$ ]]; then
+            echo "error: manifest chart repository '${CHART_REPOSITORY}' is not oci://quay.io/wire/charts/(dev|stable)/${CHART_NAME}" >&2
+            exit 1
+          fi
+          echo "channel=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "ref=${CHART_REPOSITORY#oci://}" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Publish the chart to its OCI channel
+        id: oci_chart
+        uses: wireapp/wire-rm-actions/publish-chart@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          chart-file: ${{ steps.manifest.outputs.chart-path }}
+          version: ${{ steps.manifest.outputs.version }}
+          registry: quay.io
+          channel: ${{ steps.channel.outputs.channel }}
+          username: ${{ steps.quay.outputs.username }}
+          password: ${{ steps.quay.outputs.token }}
+
+      - name: Final verification before publishing
+        env:
+          REPOSITORY: ${{ steps.manifest.outputs.image-repository }}
+          TAG: ${{ steps.manifest.outputs.image-tag }}
+          EXPECTED_DIGEST: ${{ steps.manifest.outputs.image-digest }}
+          CHART_PATH: ${{ steps.manifest.outputs.chart-path }}
+          CHART_SHA256: ${{ steps.manifest.outputs.chart-sha256 }}
+          OCI_DIGEST: ${{ steps.oci_chart.outputs.digest }}
+          OCI_CHART_REF: ${{ steps.channel.outputs.ref }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+          final=$(crane digest "${REPOSITORY}:${TAG}")
+          if [[ "$final" != "$EXPECTED_DIGEST" ]]; then
+            echo "error: ${REPOSITORY}:${TAG} resolves to $final, expected $EXPECTED_DIGEST" >&2
+            exit 1
+          fi
+          actual=$(sha256sum "$CHART_PATH" | awk '{print $1}')
+          if [[ "$actual" != "$CHART_SHA256" ]]; then
+            echo "error: chart package sha256 $actual no longer matches the manifest $CHART_SHA256" >&2
+            exit 1
+          fi
+          oci_digest=$(crane digest "${OCI_CHART_REF}:${VERSION}")
+          if [[ "$oci_digest" != "$OCI_DIGEST" ]]; then
+            echo "error: ${OCI_CHART_REF}:${VERSION} resolves to $oci_digest, expected $OCI_DIGEST" >&2
+            exit 1
+          fi
+          echo "All release artifacts verified against the release manifest: ready to publish."
+
+      - name: Docker logout
+        if: always()
+        run: docker logout quay.io
+
+      - name: Published digests
+        id: digests
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+          OCI_DIGEST: ${{ steps.oci_chart.outputs.digest }}
+          OCI_CHART_REF: ${{ steps.channel.outputs.ref }}
+        run: |
+          set -euo pipefail
+          digests=$(jq -cn --arg ref "oci://${OCI_CHART_REF}:${VERSION}" --arg digest "$OCI_DIGEST" '{($ref): $digest}')
+          echo "json=$digests" >> "$GITHUB_OUTPUT"
+
+      - name: Complete the release manifest
+        id: completed
+        uses: wireapp/wire-rm-actions/release-manifest@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: complete
+          manifest: ${{ steps.draft.outputs.manifest }}
+          out: ${{ steps.draft.outputs.asset-dir }}/release-manifest.completed.json
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          digests-json: ${{ steps.digests.outputs.json }}
+
+      - name: Publish GitHub Release
+        id: publish_release
+        uses: wireapp/wire-rm-actions/draft-release@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: publish
+          version: ${{ steps.manifest.outputs.version }}
+          release-id: ${{ steps.draft.outputs.id }}
+          expected-commit: ${{ steps.manifest.outputs.source-commit }}
+          replace-assets: release-manifest.json=${{ steps.completed.outputs.manifest }}
+          source-ref: ${{ steps.manifest.outputs.source-ref }}
+          latest-branches: ^dev$
+
+      - name: Summarise the publication
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+          KIND: ${{ steps.manifest.outputs.kind }}
+          REPOSITORY: ${{ steps.manifest.outputs.image-repository }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_STATUS: ${{ steps.image.outputs.status }}
+          CHART_DIGEST: ${{ steps.oci_chart.outputs.digest }}
+          OCI_CHART_REF: ${{ steps.channel.outputs.ref }}
+          CHART_STATUS: ${{ steps.oci_chart.outputs.status }}
+          MAKE_LATEST: ${{ steps.publish_release.outputs.make-latest }}
+          PUBLISHED_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Published [\`v${VERSION}\`](${PUBLISHED_URL}) (${KIND}, make_latest=${MAKE_LATEST})"
+            echo
+            echo "| Artifact | Identity | |"
+            echo "| --- | --- | --- |"
+            echo "| \`${REPOSITORY}:${VERSION}\` | \`${IMAGE_DIGEST}\` | ${IMAGE_STATUS} |"
+            echo "| \`oci://${OCI_CHART_REF}:${VERSION}\` | \`${CHART_DIGEST}\` | ${CHART_STATUS} |"
+            echo
+            echo "The tag \`v${VERSION}\` now exists; \`release-manifest.json\` on the release carries the \`publication\` block."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release date
+        id: released_at
+        if: ${{ !cancelled() && steps.publish_release.outcome == 'success' }}
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Release note and meta for the release managers
+        id: rm_inputs
+        if: ${{ !cancelled() && steps.publish_release.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          COMMIT: ${{ steps.manifest.outputs.source-commit }}
+          BRANCH: ${{ steps.manifest.outputs.source-ref }}
+          BODY_FILE: ${{ steps.draft.outputs.body-file }}
+          CANDIDATE_DIR: ${{ steps.draft.outputs.asset-dir }}
+          NOTE_FILE: ${{ steps.manifest.outputs.note-file }}
+          DECLARATION_FILE_NAME: ${{ steps.manifest.outputs.declaration-file }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$NOTE_FILE" ]]; then
+            description="$(cat "${CANDIDATE_DIR}/${NOTE_FILE}")"
+          else
+            description="$(cat "$BODY_FILE")"
+          fi
+          declaration_file=""
+          if [[ -n "$DECLARATION_FILE_NAME" ]]; then
+            declaration_file="${CANDIDATE_DIR}/${DECLARATION_FILE_NAME}"
+          fi
+          meta="commit=${COMMIT}"$'\n'"branch=${BRANCH}"
+          delimiter="rm_$(openssl rand -hex 16)"
+          {
+            printf 'description<<%s\n%s\n%s\n' "$delimiter" "$description" "$delimiter"
+            printf 'meta<<%s\n%s\n%s\n' "$delimiter" "$meta" "$delimiter"
+            printf 'declaration_file=%s\n' "$declaration_file"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Declare the release to the release managers
+        if: ${{ !cancelled() && steps.publish_release.outcome == 'success' }}
+        continue-on-error: true
+        uses: wireapp/wire-rm-actions/notify-rm@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          component: ${{ env.COMPONENT }}
+          version: ${{ steps.manifest.outputs.version }}
+          kind: ${{ steps.manifest.outputs.kind }}
+          repository: ${{ steps.oci_chart.outputs.repository }}
+          digest: ${{ steps.oci_chart.outputs.digest }}
+          release-url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ steps.manifest.outputs.version }}
+          released-at: ${{ steps.released_at.outputs.date }}
+          release-note-title: v${{ steps.manifest.outputs.version }}
+          release-note-description: ${{ steps.rm_inputs.outputs.description }}
+          release-declaration-file: ${{ steps.rm_inputs.outputs.declaration_file }}
+          release-manifest-file: ${{ steps.completed.outputs.manifest }}
+          meta: ${{ steps.rm_inputs.outputs.meta }}
+          rm-staging-url: ${{ vars.RM_STAGING_URL }}
+          rm-staging-audience: wire-release-manager-staging
+          rm-prod-url: ${{ vars.RM_PROD_URL }}
+          rm-prod-audience: wire-release-manager-prod
