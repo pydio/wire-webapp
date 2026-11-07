@@ -3,7 +3,7 @@ name: Deliver main
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
     inputs:
       reason:
@@ -17,6 +17,7 @@ on:
         type: boolean
 
 env:
+  TRUNK_BRANCH: ${{ github.event.repository.default_branch }}
   AWS_REGION: eu-central-1
   BUILD_ARTIFACT_PATH: apps/server/dist/s3/ebs.zip
   EDGE_ENVIRONMENT_NAME: wire-webapp-edge
@@ -27,7 +28,11 @@ env:
   DEV_WEBAPP_URL: https://wire-webapp-dev.zinfra.io/
   DEV_RUNTIME_BACKEND_REST: https://staging-nginz-https.zinfra.io/
   DEV_RUNTIME_BACKEND_WS: wss://staging-nginz-ssl.zinfra.io/
-  DOCKER_REPOSITORY: quay.io/wire/webapp
+  DOCKER_REPOSITORY: quay.io/wire/wire-webapp
+  QUAY_CHART_NAME: wire-webapp
+  QUAY_ROBOT: wire+gha_wire-webapp
+  RM_COMPONENT: webapp
+  DEV_EXPIRES_AFTER: 90d
   CHART_REPOSITORY_NAME: charts-webapp
   CHART_REPOSITORY_URL: s3://public.wire.com/charts-webapp
   WIRE_BUILDS_REPOSITORY: wireapp/wire-builds
@@ -36,6 +41,7 @@ jobs:
   validate_request:
     name: Validate main delivery request
     runs-on: ubuntu-26.04
+    if: ${{ github.ref_name == github.event.repository.default_branch }}
     permissions: {}
 
     steps:
@@ -58,8 +64,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]; then
-            if [[ "${GITHUB_REF}" != 'refs/heads/main' ]]; then
-              echo "Manual main delivery must run from refs/heads/main, received ${GITHUB_REF}." >&2
+            if [[ "${GITHUB_REF}" != "refs/heads/${TRUNK_BRANCH}" ]]; then
+              echo "Manual main delivery must run from refs/heads/${TRUNK_BRANCH}, received ${GITHUB_REF}." >&2
               exit 1
             fi
 
@@ -81,6 +87,8 @@ jobs:
     permissions:
       contents: read
     outputs:
+      version: ${{ steps.version.outputs.version }}
+      kind: ${{ steps.version.outputs.kind }}
       main_artifact_name: ${{ steps.prepare_artifact.outputs.main_artifact_name }}
       artifact_version: ${{ steps.validate_artifact_metadata.outputs.artifact_version }}
       artifact_asset_version: ${{ steps.validate_artifact_metadata.outputs.artifact_asset_version }}
@@ -108,13 +116,21 @@ jobs:
       - name: Update configuration
         run: npx just setup
 
+      - name: Compute the dev version
+        id: version
+        uses: wireapp/wire-rm-actions/version@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          release-branches: ^(main|dev|release/.+)$
+
       - name: Resolve main webapp build metadata inputs
         id: build_metadata_inputs
         shell: bash
+        env:
+          DEV_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
-          echo "version=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "version=${DEV_VERSION}" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Build and package internal application
@@ -207,12 +223,12 @@ jobs:
 
           latest_main_sha="$(
             gh api \
-              "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/${TRUNK_BRANCH}" \
               --jq '.object.sha'
           )"
 
           if [[ -z "${latest_main_sha}" ]]; then
-            echo 'Unable to resolve the current main SHA.' >&2
+            echo "Unable to resolve the current ${TRUNK_BRANCH} SHA." >&2
             exit 1
           fi
 
@@ -336,12 +352,12 @@ jobs:
 
           latest_main_sha="$(
             gh api \
-              "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/${TRUNK_BRANCH}" \
               --jq '.object.sha'
           )"
 
           if [[ -z "${latest_main_sha}" ]]; then
-            echo 'Unable to resolve the current main SHA.' >&2
+            echo "Unable to resolve the current ${TRUNK_BRANCH} SHA." >&2
             exit 1
           fi
 
@@ -479,12 +495,13 @@ jobs:
     permissions:
       actions: read
       contents: read
+      id-token: write
     concurrency:
       group: publish-webapp-distribution
       cancel-in-progress: false
       queue: max
     outputs:
-      docker_image_tag: ${{ steps.publish_docker.outputs.docker_image_tag }}
+      docker_image_tag: ${{ steps.publish_docker.outputs.tag }}
       helm_chart_version: ${{ steps.publish_helm.outputs.helm_chart_version }}
       wire_builds_commit_sha: ${{ steps.update_wire_builds.outputs.wire_builds_commit_sha }}
       superseded: ${{ steps.check_latest_main.outputs.superseded }}
@@ -517,15 +534,18 @@ jobs:
         with:
           version: '3.22.1'
 
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6
+
       - name: Check whether this main delivery is current
         id: check_latest_main
         shell: bash
         run: |
           set -euo pipefail
 
-          latest_main_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          latest_main_sha="$(git ls-remote origin "refs/heads/${TRUNK_BRANCH}" | awk '{print $1}')"
           if [[ -z "${latest_main_sha}" ]]; then
-            echo 'Unable to resolve the current origin/main SHA.' >&2
+            echo "Unable to resolve the current origin/${TRUNK_BRANCH} SHA." >&2
             exit 1
           fi
 
@@ -539,25 +559,96 @@ jobs:
           echo 'superseded=false' >> "$GITHUB_OUTPUT"
           echo 'publish_allowed=true' >> "$GITHUB_OUTPUT"
 
+      - name: Log in to Quay with the OIDC token of the job
+        id: quay
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/quay-login@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          robot: ${{ env.QUAY_ROBOT }}
+
       - name: Publish or reuse dev Docker image
         id: publish_docker
         if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
-        env:
-          DOCKER_PASSWORD: ${{ secrets.WEBTEAM_QUAY_PASSWORD }}
-          DOCKER_USERNAME: ${{ secrets.WEBTEAM_QUAY_USERNAME }}
-          DOCKER_REPOSITORY: ${{ env.DOCKER_REPOSITORY }}
-          DOCKER_IMAGE_TAG_OUTPUT_PATH: ${{ runner.temp }}/main-development-image-tag.txt
-          WIRE_WEBAPP_RELEASE_COMMIT_SHA: ${{ github.sha }}
-          WIRE_WEBAPP_DOCKER_CONTEXT_PATH: ${{ github.workspace }}/main-development-context
-        run: ./tools/dockerPublication/publishDevelopmentDocker.sh
+        uses: wireapp/wire-rm-actions/build-image@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          dockerfile: main-development-context/apps/server/Dockerfile
+          context: main-development-context
+          image: ${{ env.DOCKER_REPOSITORY }}
+          version: ${{ needs.build_main_artifacts.outputs.version }}
+          revision: ${{ github.sha }}
+          provenance: 'false'
+          sbom: 'false'
+          expires-after: ${{ env.DEV_EXPIRES_AFTER }}
 
-      - name: Publish or reuse dev Helm chart
+      - name: Prepare the Quay chart
+        id: quay_chart
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chart_directory="${RUNNER_TEMP}/quay-chart/${QUAY_CHART_NAME}"
+          mkdir -p "${RUNNER_TEMP}/quay-chart"
+          cp -a charts/webapp "${chart_directory}"
+          yq -i '.name = strenv(QUAY_CHART_NAME)' "${chart_directory}/Chart.yaml"
+          yq -i '.image.repository = strenv(DOCKER_REPOSITORY)' "${chart_directory}/values.yaml"
+          echo "chart_path=${chart_directory}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish or reuse dev Helm chart on Quay
+        id: publish_chart
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/publish-chart@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          chart-path: ${{ steps.quay_chart.outputs.chart_path }}
+          version: ${{ needs.build_main_artifacts.outputs.version }}
+          channel: dev
+          expires-after: ${{ env.DEV_EXPIRES_AFTER }}
+          username: ${{ steps.quay.outputs.username }}
+          password: ${{ steps.quay.outputs.token }}
+
+      - name: Write the dev release manifest
+        id: manifest
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        continue-on-error: true
+        uses: wireapp/wire-rm-actions/release-manifest@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: write
+          manifest: ${{ runner.temp }}/release-manifest.json
+          component: ${{ env.RM_COMPONENT }}
+          release-type: dev
+          version: ${{ needs.build_main_artifacts.outputs.version }}
+          source-repository: ${{ github.server_url }}/${{ github.repository }}
+          source-ref: ${{ github.ref_name }}
+          source-commit: ${{ github.sha }}
+          image-repository: ${{ steps.publish_docker.outputs.image }}
+          image-digest: ${{ steps.publish_docker.outputs.digest }}
+          chart-repository: ${{ steps.publish_chart.outputs.repository }}
+          chart-digest: ${{ steps.publish_chart.outputs.digest }}
+          expires-after: ${{ env.DEV_EXPIRES_AFTER }}
+
+      - name: Declare the dev build to the release managers
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/notify-rm@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          rm-staging-url: ${{ vars.RM_STAGING_URL }}
+          rm-staging-audience: wire-release-manager-staging
+          rm-prod-url: ${{ vars.RM_PROD_URL }}
+          rm-prod-audience: wire-release-manager-prod
+          component: ${{ env.RM_COMPONENT }}
+          version: ${{ needs.build_main_artifacts.outputs.version }}
+          kind: ${{ needs.build_main_artifacts.outputs.kind }}
+          repository: ${{ steps.publish_chart.outputs.repository }}
+          digest: ${{ steps.publish_chart.outputs.digest }}
+          release-manifest-file: ${{ steps.manifest.outcome == 'success' && steps.manifest.outputs.manifest || '' }}
+
+      - name: Publish or reuse dev Helm chart on S3
         id: publish_helm
         if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CHARTS_WEBAPP_AUTOMATION_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CHARTS_WEBAPP_AUTOMATION_AWS_SECRET_ACCESS_KEY }}
-          DOCKER_IMAGE_TAG: ${{ steps.publish_docker.outputs.docker_image_tag }}
+          HELM_CHART_VERSION: ${{ needs.build_main_artifacts.outputs.version }}
+          HELM_IMAGE_REPOSITORY: ${{ env.DOCKER_REPOSITORY }}
           CHART_REPOSITORY_NAME: ${{ env.CHART_REPOSITORY_NAME }}
           CHART_REPOSITORY_URL: ${{ env.CHART_REPOSITORY_URL }}
         run: ./tools/helmPublication/publishDevelopmentHelm.sh
@@ -576,7 +667,7 @@ jobs:
         id: update_wire_builds
         if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
         env:
-          DOCKER_IMAGE_TAG: ${{ steps.publish_docker.outputs.docker_image_tag }}
+          DOCKER_IMAGE_TAG: ${{ steps.publish_docker.outputs.tag }}
           HELM_CHART_VERSION: ${{ steps.publish_helm.outputs.helm_chart_version }}
           RELEASE_COMMIT_SHA: ${{ github.sha }}
         working-directory: wire-builds
@@ -591,10 +682,12 @@ jobs:
           ARTIFACT_ASSET_VERSION: ${{ needs.build_main_artifacts.outputs.artifact_asset_version }}
           CHART_REPOSITORY_URL: ${{ env.CHART_REPOSITORY_URL }}
           DOCKER_IMAGE_OUTCOME: ${{ steps.publish_docker.outcome }}
-          DOCKER_IMAGE_TAG: ${{ steps.publish_docker.outputs.docker_image_tag }}
+          DOCKER_IMAGE_TAG: ${{ steps.publish_docker.outputs.tag }}
           DOCKER_REPOSITORY: ${{ env.DOCKER_REPOSITORY }}
           HELM_CHART_OUTCOME: ${{ steps.publish_helm.outcome }}
           HELM_CHART_VERSION: ${{ steps.publish_helm.outputs.helm_chart_version }}
+          QUAY_CHART_OUTCOME: ${{ steps.publish_chart.outcome }}
+          QUAY_CHART_REPOSITORY: ${{ steps.publish_chart.outputs.repository }}
           WIRE_BUILDS_COMMIT_OUTCOME: ${{ steps.update_wire_builds.outcome }}
           WIRE_BUILDS_COMMIT_SHA: ${{ steps.update_wire_builds.outputs.wire_builds_commit_sha }}
           WIRE_BUILDS_REPOSITORY: ${{ env.WIRE_BUILDS_REPOSITORY }}
@@ -607,6 +700,7 @@ jobs:
             channel_result='skipped as superseded'
           elif [[
             "${DOCKER_IMAGE_OUTCOME:-}" == 'success' &&
+            "${QUAY_CHART_OUTCOME:-}" == 'success' &&
             "${HELM_CHART_OUTCOME:-}" == 'success' &&
             "${WIRE_BUILDS_COMMIT_OUTCOME:-}" == 'success'
           ]]; then
@@ -648,6 +742,7 @@ jobs:
             echo "- Built at (UTC): ${ARTIFACT_BUILT_AT:-not available}"
             echo '- Target channel: dev'
             echo "- Docker image: ${docker_image_reference}"
+            echo "- Helm chart on Quay: ${QUAY_CHART_REPOSITORY:-not published}"
             echo "- Helm chart repository: ${CHART_REPOSITORY_URL}"
             echo "- Helm chart version: ${HELM_CHART_VERSION:-not published}"
             echo "- wire-builds/dev commit: ${wire_builds_commit}"
