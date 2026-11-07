@@ -1,0 +1,403 @@
+name: Prepare release
+
+run-name: Prepare ${{ inputs.type }} from ${{ inputs.source_branch }} (by @${{ github.actor }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Branch to release from: dev, or a maintained release/X.Y line'
+        type: string
+        default: dev
+        required: true
+      type:
+        description: 'Release channel'
+        type: choice
+        options: [alpha, beta, rc, ga]
+        default: alpha
+        required: true
+      bump:
+        description: 'Only applies to a GA cut from a GA, and to the first pre-release after a GA'
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+        required: true
+      force:
+        description: 'Bypass the CI status gate on the source commit (logged loudly)'
+        type: boolean
+        default: false
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: prepare-release-${{ inputs.source_branch }}-${{ inputs.type }}
+  cancel-in-progress: false
+
+env:
+  COMPONENT: webapp
+  IMAGE_REPOSITORY: quay.io/wire/wire-webapp
+  CHART_NAME: wire-webapp
+  QUAY_ROBOT: wire+gha_wire-webapp
+  HELM_VERSION: v3.22.0
+
+jobs:
+  prepare:
+    name: Prepare release candidate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      checks: read
+      statuses: read
+      actions: read
+      id-token: write
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_id: ${{ steps.release.outputs.id }}
+
+    steps:
+      - name: Validate inputs
+        id: inputs
+        uses: wireapp/wire-rm-actions/release-inputs@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          source-branch: ${{ inputs.source_branch }}
+          type: ${{ inputs.type }}
+          version-bump: ${{ inputs.bump }}
+          force: ${{ inputs.force }}
+
+      - name: Chart channel
+        id: channel
+        env:
+          RELEASE_TYPE: ${{ inputs.type }}
+        run: |
+          set -euo pipefail
+          channel=dev
+          if [[ "$RELEASE_TYPE" == "ga" ]]; then
+            channel=stable
+          fi
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+          echo "repository=oci://quay.io/wire/charts/${channel}/${CHART_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify source branch exists
+        uses: wireapp/wire-rm-actions/release-source@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: verify
+          source-branch: ${{ inputs.source_branch }}
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ inputs.source_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve source commit
+        id: source
+        uses: wireapp/wire-rm-actions/release-source@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: resolve
+          source-branch: ${{ inputs.source_branch }}
+
+      - name: Compute target version
+        id: version
+        uses: wireapp/wire-rm-actions/version@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: release
+          source-branch: ${{ inputs.source_branch }}
+          release-type: ${{ steps.inputs.outputs.release-type }}
+          version-bump: ${{ inputs.bump }}
+
+      - name: Summarise the candidate
+        uses: wireapp/wire-rm-actions/release-source@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: summary
+          source-branch: ${{ inputs.source_branch }}
+          version: ${{ steps.version.outputs.version }}
+          release-type: ${{ inputs.type }}
+          source-sha: ${{ steps.source.outputs.sha }}
+          base-tag: ${{ steps.version.outputs.base-tag }}
+          from-tag: ${{ steps.version.outputs.from-tag }}
+          note: Building the candidate image and the chart. The draft release link appears here once created.
+
+      - name: Check the compatibility file
+        uses: wireapp/wire-rm-actions/compatibility@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          file: publication/compatibility.yaml
+
+      - name: CI gate
+        uses: wireapp/wire-rm-actions/ci-gate@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          version: ${{ steps.version.outputs.version }}
+          source-commit: ${{ steps.source.outputs.sha }}
+          force: ${{ steps.inputs.outputs.force }}
+          checks-from: all
+          exclude-workflows: |
+            publish-main.yml
+            publish-and-deploy-webapp.yml
+            create_docker_image.yml
+            release-cloud.yml
+
+      - name: Require the source build script
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x tools/maintenance/build.sh ]]; then
+            echo "::error::${SOURCE_BRANCH} must provide an executable tools/maintenance/build.sh"
+            exit 1
+          fi
+
+      - name: Setup Node.js of the source
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Build the application
+        env:
+          WIRE_WEBAPP_BUILD_VERSION: ${{ steps.version.outputs.version }}
+          WIRE_WEBAPP_BUILD_COMMIT: ${{ steps.source.outputs.sha }}
+        run: ./tools/maintenance/build.sh
+
+      - name: Check the build metadata
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+          EXPECTED_COMMIT: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          metadata=apps/server/dist/version.json
+          commit=$(jq -r '.commit // empty' "$metadata")
+          if [[ "$commit" != "$EXPECTED_COMMIT" ]]; then
+            echo "::error::${metadata} says commit '${commit}', expected ${EXPECTED_COMMIT}"
+            exit 1
+          fi
+          version=$(jq -r '.version // empty' "$metadata")
+          if [[ "$version" != "$EXPECTED_VERSION" ]]; then
+            echo "::warning::${metadata} says version '${version}', not ${EXPECTED_VERSION}: this source does not read WIRE_WEBAPP_BUILD_VERSION"
+          fi
+          jq . "$metadata"
+
+      - name: Assemble the Docker context
+        id: context
+        run: |
+          set -euo pipefail
+          context="${RUNNER_TEMP}/docker-context"
+          mkdir -p "$context"
+          git archive --format=tar HEAD | tar -xf - -C "$context"
+          rm -rf "${context}/apps/server/dist" "${context}/libraries/config/lib"
+          cp -R apps/server/dist "${context}/apps/server/dist"
+          cp -R libraries/config/lib "${context}/libraries/config/lib"
+          test -s .env.defaults || { echo "::error::the build did not produce .env.defaults"; exit 1; }
+          cp .env.defaults "${context}/.env.defaults"
+          echo "path=${context}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to quay.io with the OIDC token of the run
+        id: quay
+        uses: wireapp/wire-rm-actions/quay-login@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          robot: ${{ env.QUAY_ROBOT }}
+
+      - name: Push the candidate image
+        id: image
+        uses: wireapp/wire-rm-actions/build-image@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          dockerfile: ${{ steps.context.outputs.path }}/apps/server/Dockerfile
+          context: ${{ steps.context.outputs.path }}
+          image: ${{ env.IMAGE_REPOSITORY }}
+          version: ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.version }}-candidate-${{ github.run_id }}
+          revision: ${{ steps.source.outputs.sha }}
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Package the chart
+        id: chart
+        env:
+          TARGET: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_dir="${RUNNER_TEMP}/release"
+          chart_dir="${RUNNER_TEMP}/chart/${CHART_NAME}"
+          mkdir -p "$release_dir" "${RUNNER_TEMP}/chart"
+          cp -a charts/webapp "$chart_dir"
+          yq -i '.name = strenv(CHART_NAME)' "${chart_dir}/Chart.yaml"
+          yq -i '.image.repository = strenv(IMAGE_REPOSITORY)' "${chart_dir}/values.yaml"
+          helm package "$chart_dir" --version "$TARGET" --app-version "$TARGET" --destination "$release_dir" >/dev/null
+          package_file="${CHART_NAME}-${TARGET}.tgz"
+          [[ -f "${release_dir}/${package_file}" ]] || { echo "error: helm package did not produce ${package_file}" >&2; exit 1; }
+          sha256=$(sha256sum "${release_dir}/${package_file}" | awk '{print $1}')
+          {
+            echo "release_dir=$release_dir"
+            echo "package_file=$package_file"
+            echo "package_path=${release_dir}/${package_file}"
+            echo "sha256=$sha256"
+          } >> "$GITHUB_OUTPUT"
+          echo "Candidate chart: ${package_file} (sha256 ${sha256})"
+
+      - name: Gather the release documents
+        id: documents
+        uses: wireapp/wire-rm-actions/release-documents@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          component: ${{ env.COMPONENT }}
+          version: ${{ steps.version.outputs.version }}
+          release-type: ${{ inputs.type }}
+          note-input: ignore
+          out-dir: ${{ steps.chart.outputs.release_dir }}
+
+      - name: Write the release manifest
+        id: manifest
+        uses: wireapp/wire-rm-actions/release-manifest@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: write
+          manifest: ${{ steps.chart.outputs.release_dir }}/release-manifest.json
+          component: ${{ env.COMPONENT }}
+          version: ${{ steps.version.outputs.version }}
+          release-type: ${{ inputs.type }}
+          source-repository: ${{ github.server_url }}/${{ github.repository }}
+          source-ref: ${{ inputs.source_branch }}
+          source-commit: ${{ steps.source.outputs.sha }}
+          image-repository: ${{ env.IMAGE_REPOSITORY }}
+          image-digest: ${{ steps.image.outputs.digest }}
+          image-candidate-tag: ${{ steps.image.outputs.tag }}
+          chart-repository: ${{ steps.channel.outputs.repository }}
+          chart-file: ${{ steps.chart.outputs.package_file }}
+          chart-sha256: ${{ steps.chart.outputs.sha256 }}
+          documents-json: ${{ steps.documents.outputs.documents-json }}
+
+      - name: Changelog since the previous release
+        id: changelog
+        uses: wireapp/wire-rm-actions/changelog@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          from-tag: ${{ steps.version.outputs.from-tag }}
+          to-ref: ${{ steps.source.outputs.sha }}
+          heading: 'false'
+          exclude: chore docs refactor style test runfix
+          merge-commits: pull-request
+          collapse: ci
+          output-file: ${{ runner.temp }}/changelog.md
+
+      - name: Write the release body
+        id: body
+        env:
+          RELEASE_TYPE: ${{ inputs.type }}
+          CHART_REPOSITORY: ${{ steps.channel.outputs.repository }}
+          TARGET: ${{ steps.version.outputs.version }}
+          FROM_TAG: ${{ steps.version.outputs.from-tag }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.sha }}
+          CHANGELOG_FILE: ${{ steps.changelog.outputs.file }}
+          CHANGELOG_COUNT: ${{ steps.changelog.outputs.count }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_SHA256: ${{ steps.chart.outputs.sha256 }}
+          RELEASE_DIR: ${{ steps.chart.outputs.release_dir }}
+          NOTE_FILE: ${{ steps.documents.outputs.note-file }}
+          NOTE_PATH: ${{ steps.documents.outputs.note-path }}
+          DECLARATION_FILE: ${{ steps.documents.outputs.declaration-file }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          base_version="${TARGET%%-*}"
+          notes_url=""
+          if [[ -n "$NOTE_PATH" ]]; then
+            notes_url="${SERVER_URL}/${REPOSITORY}/blob/${SOURCE_COMMIT}/${NOTE_PATH}"
+          fi
+          body_file="${RUNNER_TEMP}/release-body.md"
+          {
+            if [[ "$RELEASE_TYPE" == "ga" ]]; then
+              if [[ -n "$NOTE_FILE" ]]; then
+                cat "${RELEASE_DIR}/${NOTE_FILE}"
+                echo
+                echo "---"
+                echo
+              fi
+            else
+              echo "> [!IMPORTANT]"
+              echo "> **This is a pre-release (\`${RELEASE_TYPE}\`).** It is a candidate for \`${base_version}\` from \`${SOURCE_BRANCH}\`, not a shipped release: deploy it to non-production environments only."
+              if [[ -n "$notes_url" ]]; then
+                echo ">"
+                echo "> Release notes for ${base_version}: [\`${NOTE_PATH}\`](${notes_url})"
+              fi
+              echo
+              echo "---"
+              echo
+            fi
+            echo "### Changes since \`${FROM_TAG}\`"
+            echo
+            if (( CHANGELOG_COUNT == 0 )); then
+              echo "_No user-facing changes since \`${FROM_TAG}\`._"
+            else
+              cat "$CHANGELOG_FILE"
+            fi
+            echo
+            echo "---"
+            echo
+            echo "### Artifacts"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Docker image | \`${IMAGE_REPOSITORY}:${TARGET}\` |"
+            echo "| Helm chart | \`${CHART_REPOSITORY}:${TARGET}\` |"
+            echo "| Release manifest | \`release-manifest.json\`, attached below |"
+            if [[ -n "$DECLARATION_FILE" ]]; then
+              echo "| Release declaration | \`release-declaration.json\`, attached below |"
+            fi
+            echo
+            echo "<details>"
+            echo "<summary>Checksums and provenance</summary>"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Source commit | \`${SOURCE_COMMIT}\` |"
+            echo "| Image digest | \`${IMAGE_DIGEST}\` |"
+            echo "| Chart SHA256 | \`${CHART_SHA256}\` |"
+            echo
+            echo "</details>"
+          } > "$body_file"
+          echo "file=$body_file" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft GitHub Release
+        id: release
+        uses: wireapp/wire-rm-actions/draft-release@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: create
+          version: ${{ steps.version.outputs.version }}
+          target: ${{ steps.source.outputs.sha }}
+          body-file: ${{ steps.body.outputs.file }}
+          assets: |
+            ${{ steps.chart.outputs.package_path }}
+            ${{ steps.chart.outputs.release_dir }}/release-manifest.json
+            ${{ steps.documents.outputs.note-file && format('{0}/{1}', steps.chart.outputs.release_dir, steps.documents.outputs.note-file) || '' }}
+            ${{ steps.documents.outputs.declaration-file && format('{0}/{1}', steps.chart.outputs.release_dir, steps.documents.outputs.declaration-file) || '' }}
+
+      - name: Summarise the draft
+        env:
+          CANDIDATE_TAG: ${{ steps.image.outputs.tag }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_SHA256: ${{ steps.chart.outputs.sha256 }}
+          PACKAGE_FILE: ${{ steps.chart.outputs.package_file }}
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "| Asset | Identity |"
+            echo "| --- | --- |"
+            echo "| \`${IMAGE_REPOSITORY}:${CANDIDATE_TAG}\` | \`${IMAGE_DIGEST}\` |"
+            echo "| \`${PACKAGE_FILE}\` | sha256 \`${CHART_SHA256}\` |"
+            echo
+            echo "Approve the \`release-publication\` environment on this run to publish. Publication promotes these exact artifacts by digest; it never rebuilds them."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish
+    needs: prepare
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      release_id: ${{ needs.prepare.outputs.release_id }}
