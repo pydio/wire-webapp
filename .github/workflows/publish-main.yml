@@ -199,6 +199,7 @@ jobs:
     name: Deploy to Edge
     runs-on: ubuntu-26.04
     needs: build_main_artifacts
+    if: ${{ github.repository == 'wireapp/wire-webapp' }}
     permissions:
       contents: read
     concurrency:
@@ -330,6 +331,7 @@ jobs:
     name: Deploy to Hosted Dev
     runs-on: ubuntu-26.04
     needs: build_main_artifacts
+    if: ${{ github.repository == 'wireapp/wire-webapp' }}
     permissions:
       contents: read
     concurrency:
@@ -643,7 +645,7 @@ jobs:
 
       - name: Publish or reuse dev Helm chart on S3
         id: publish_helm
-        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' && github.repository == 'wireapp/wire-webapp' }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CHARTS_WEBAPP_AUTOMATION_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CHARTS_WEBAPP_AUTOMATION_AWS_SECRET_ACCESS_KEY }}
@@ -654,7 +656,7 @@ jobs:
         run: ./tools/helmPublication/publishDevelopmentHelm.sh
 
       - name: Check out wire-builds dev
-        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' && github.repository == 'wireapp/wire-webapp' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           repository: ${{ env.WIRE_BUILDS_REPOSITORY }}
@@ -665,7 +667,7 @@ jobs:
 
       - name: Update wire-builds dev idempotently
         id: update_wire_builds
-        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' && github.repository == 'wireapp/wire-webapp' }}
         env:
           DOCKER_IMAGE_TAG: ${{ steps.publish_docker.outputs.tag }}
           HELM_CHART_VERSION: ${{ steps.publish_helm.outputs.helm_chart_version }}
@@ -701,8 +703,8 @@ jobs:
           elif [[
             "${DOCKER_IMAGE_OUTCOME:-}" == 'success' &&
             "${QUAY_CHART_OUTCOME:-}" == 'success' &&
-            "${HELM_CHART_OUTCOME:-}" == 'success' &&
-            "${WIRE_BUILDS_COMMIT_OUTCOME:-}" == 'success'
+            "${HELM_CHART_OUTCOME:-}" =~ ^(success|skipped)$ &&
+            "${WIRE_BUILDS_COMMIT_OUTCOME:-}" =~ ^(success|skipped)$
           ]]; then
             channel_result='published successfully'
           else
@@ -764,6 +766,7 @@ jobs:
     if: >-
       ${{
         always() &&
+        github.repository == 'wireapp/wire-webapp' &&
         (
           needs.build_main_artifacts.result == 'failure' ||
           needs.deploy_to_edge.result == 'failure' ||
