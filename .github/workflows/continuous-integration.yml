@@ -11,7 +11,7 @@ on:
 
   push:
     # We also run CI on dev in order to update the coverage monitoring
-    branches: [dev]
+    branches: [dev, release/*]
 
 concurrency:
   group: ci-${{ github.ref }}
