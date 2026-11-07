@@ -28,7 +28,8 @@ env:
   DEV_WEBAPP_URL: https://wire-webapp-dev.zinfra.io/
   DEV_RUNTIME_BACKEND_REST: https://staging-nginz-https.zinfra.io/
   DEV_RUNTIME_BACKEND_WS: wss://staging-nginz-ssl.zinfra.io/
-  DOCKER_REPOSITORY: quay.io/wire/webapp
+  DOCKER_REPOSITORY: quay.io/wire/wire-webapp
+  QUAY_CHART_NAME: wire-webapp
   QUAY_ROBOT: wire+gha_wire-webapp
   RM_COMPONENT: webapp
   DEV_EXPIRES_AFTER: 90d
@@ -579,12 +580,26 @@ jobs:
           sbom: 'false'
           expires-after: ${{ env.DEV_EXPIRES_AFTER }}
 
+      - name: Prepare the Quay chart
+        id: quay_chart
+        if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chart_directory="${RUNNER_TEMP}/quay-chart/${QUAY_CHART_NAME}"
+          mkdir -p "${RUNNER_TEMP}/quay-chart"
+          cp -a charts/webapp "${chart_directory}"
+          yq -i '.name = strenv(QUAY_CHART_NAME)' "${chart_directory}/Chart.yaml"
+          yq -i '.image.repository = strenv(DOCKER_REPOSITORY)' "${chart_directory}/values.yaml"
+          echo "chart_path=${chart_directory}" >> "$GITHUB_OUTPUT"
+
       - name: Publish or reuse dev Helm chart on Quay
         id: publish_chart
         if: ${{ steps.check_latest_main.outputs.publish_allowed == 'true' }}
         uses: wireapp/wire-rm-actions/publish-chart@813f008b900b1ad3284502f97cac343d80b1836b
         with:
-          chart-path: charts/webapp
+          chart-path: ${{ steps.quay_chart.outputs.chart_path }}
           version: ${{ needs.build_main_artifacts.outputs.version }}
           channel: dev
           expires-after: ${{ env.DEV_EXPIRES_AFTER }}
@@ -633,6 +648,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.CHARTS_WEBAPP_AUTOMATION_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CHARTS_WEBAPP_AUTOMATION_AWS_SECRET_ACCESS_KEY }}
           HELM_CHART_VERSION: ${{ needs.build_main_artifacts.outputs.version }}
+          HELM_IMAGE_REPOSITORY: ${{ env.DOCKER_REPOSITORY }}
           CHART_REPOSITORY_NAME: ${{ env.CHART_REPOSITORY_NAME }}
           CHART_REPOSITORY_URL: ${{ env.CHART_REPOSITORY_URL }}
         run: ./tools/helmPublication/publishDevelopmentHelm.sh

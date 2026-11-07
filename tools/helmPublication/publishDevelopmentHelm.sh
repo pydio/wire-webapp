@@ -5,6 +5,7 @@ set -euo pipefail
 : "${CHART_REPOSITORY_NAME:?CHART_REPOSITORY_NAME is required}"
 : "${CHART_REPOSITORY_URL:?CHART_REPOSITORY_URL is required}"
 : "${HELM_CHART_VERSION:?HELM_CHART_VERSION is required}"
+: "${HELM_IMAGE_REPOSITORY:?HELM_IMAGE_REPOSITORY is required}"
 
 helm plugin install https://github.com/hypnoglow/helm-s3.git --version 0.15.1
 helm repo add "${CHART_REPOSITORY_NAME}" "${CHART_REPOSITORY_URL}"
@@ -20,6 +21,7 @@ if [[ "${published_count}" -gt 0 ]]; then
 else
   CHART_VERSION="${HELM_CHART_VERSION}" \
     yq -i '.version = strenv(CHART_VERSION) | .appVersion = strenv(CHART_VERSION)' charts/webapp/Chart.yaml
+  yq -i '.image.repository = strenv(HELM_IMAGE_REPOSITORY)' charts/webapp/values.yaml
   chart_package_directory="${RUNNER_TEMP}/development-webapp-chart"
   mkdir -p "${chart_package_directory}"
   helm package ./charts/webapp --destination "${chart_package_directory}"
