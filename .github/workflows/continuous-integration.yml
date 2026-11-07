@@ -9,6 +9,9 @@ on:
   merge_group:
     branches: [main, dev, release/*, maintenance/*]
 
+  push:
+    branches: [dev, release/*]
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -303,7 +306,7 @@ jobs:
       contents: read
     env:
       # Pin the comparison to the target branch commit from the event, even if the branch advances.
-      BASE_REF: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+      BASE_REF: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
     steps:
       - name: Checkout repository
