@@ -9,6 +9,9 @@ on:
   merge_group:
     branches: [main, release/*, maintenance/*]
 
+  push:
+    branches: [release/*]
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -75,7 +78,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
+          package-manager-cache: false
 
       - name: Verify sparse runtime validation entry point
         run: bash ./tools/runtime-verification/verifySparseRuntimeValidation.sh
@@ -133,7 +136,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: ./bin/yarn --immutable
@@ -161,7 +164,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: ./bin/yarn --immutable
@@ -189,7 +192,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: ./bin/yarn --immutable
@@ -227,7 +230,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: ./bin/yarn --immutable
@@ -283,7 +286,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: ./bin/yarn --immutable
@@ -332,7 +335,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: ./bin/yarn --immutable
