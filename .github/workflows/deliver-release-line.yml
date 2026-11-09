@@ -1,0 +1,207 @@
+---
+name: Deliver release line
+
+on:
+  push:
+    branches: [release/*]
+
+permissions: {}
+
+concurrency:
+  group: deliver-release-line-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOCKER_REPOSITORY: quay.io/wire/wire-webapp
+  QUAY_CHART_NAME: wire-webapp
+  QUAY_ROBOT: wire+gha_wire-webapp
+  RM_COMPONENT: webapp
+  DEV_EXPIRES_AFTER: 90d
+
+jobs:
+  deliver:
+    name: Publish the development build of the release line
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Check whether this delivery is current
+        id: current
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          latest_sha="$(git ls-remote origin "refs/heads/${BRANCH}" | awk '{print $1}')"
+          if [[ -z "${latest_sha}" ]]; then
+            echo "Unable to resolve the current origin/${BRANCH} SHA." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_SHA}" != "${latest_sha}" ]]; then
+            echo "Skipping the delivery because ${GITHUB_SHA} was superseded by ${latest_sha} on ${BRANCH}."
+            echo 'publish_allowed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'publish_allowed=true' >> "$GITHUB_OUTPUT"
+
+      - name: Compute the dev version
+        id: version
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/version@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          release-branches: ^(main|dev|release/.+)$
+
+      - name: Require the build script
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x tools/maintenance/build.sh ]]; then
+            echo "::error::${BRANCH} must provide an executable tools/maintenance/build.sh"
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
+        with:
+          node-version-file: '.nvmrc'
+          package-manager-cache: false
+
+      - name: Build the application
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        env:
+          WIRE_WEBAPP_BUILD_VERSION: ${{ steps.version.outputs.version }}
+          WIRE_WEBAPP_BUILD_COMMIT: ${{ github.sha }}
+        run: ./tools/maintenance/build.sh
+
+      - name: Check the build metadata
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          metadata=apps/server/dist/version.json
+          commit=$(jq -r '.commit // empty' "$metadata")
+          if [[ "$commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::${metadata} says commit '${commit}', expected ${GITHUB_SHA}"
+            exit 1
+          fi
+          version=$(jq -r '.version // empty' "$metadata")
+          if [[ "$version" != "$EXPECTED_VERSION" ]]; then
+            echo "::warning::${metadata} says version '${version}', not ${EXPECTED_VERSION}: this source does not read WIRE_WEBAPP_BUILD_VERSION"
+          fi
+          jq . "$metadata"
+
+      - name: Assemble the Docker context
+        id: context
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        run: |
+          set -euo pipefail
+          context="${RUNNER_TEMP}/docker-context"
+          mkdir -p "$context"
+          git archive --format=tar HEAD | tar -xf - -C "$context"
+          rm -rf "${context}/apps/server/dist" "${context}/libraries/config/lib"
+          cp -R apps/server/dist "${context}/apps/server/dist"
+          cp -R libraries/config/lib "${context}/libraries/config/lib"
+          test -s .env.defaults || { echo "::error::the build did not produce .env.defaults"; exit 1; }
+          cp .env.defaults "${context}/.env.defaults"
+          echo "path=${context}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Quay with the OIDC token of the job
+        id: quay
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/quay-login@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          robot: ${{ env.QUAY_ROBOT }}
+
+      - name: Publish or reuse the dev Docker image
+        id: image
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/build-image@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          dockerfile: ${{ steps.context.outputs.path }}/apps/server/Dockerfile
+          context: ${{ steps.context.outputs.path }}
+          image: ${{ env.DOCKER_REPOSITORY }}
+          version: ${{ steps.version.outputs.version }}
+          revision: ${{ github.sha }}
+          provenance: 'false'
+          sbom: 'false'
+          expires-after: ${{ env.DEV_EXPIRES_AFTER }}
+
+      - name: Setup Helm
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2
+        with:
+          version: '3.22.1'
+
+      - name: Setup ORAS
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6
+
+      - name: Prepare the Quay chart
+        id: chart
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        run: |
+          set -euo pipefail
+          chart_directory="${RUNNER_TEMP}/quay-chart/${QUAY_CHART_NAME}"
+          mkdir -p "${RUNNER_TEMP}/quay-chart"
+          cp -a charts/webapp "${chart_directory}"
+          yq -i '.name = strenv(QUAY_CHART_NAME)' "${chart_directory}/Chart.yaml"
+          yq -i '.image.repository = strenv(DOCKER_REPOSITORY)' "${chart_directory}/values.yaml"
+          echo "chart_path=${chart_directory}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish or reuse the dev Helm chart on Quay
+        id: publish_chart
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/publish-chart@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          chart-path: ${{ steps.chart.outputs.chart_path }}
+          version: ${{ steps.version.outputs.version }}
+          channel: dev
+          expires-after: ${{ env.DEV_EXPIRES_AFTER }}
+          username: ${{ steps.quay.outputs.username }}
+          password: ${{ steps.quay.outputs.token }}
+
+      - name: Write the dev release manifest
+        id: manifest
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        continue-on-error: true
+        uses: wireapp/wire-rm-actions/release-manifest@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          mode: write
+          manifest: ${{ runner.temp }}/release-manifest.json
+          component: ${{ env.RM_COMPONENT }}
+          release-type: dev
+          version: ${{ steps.version.outputs.version }}
+          source-repository: ${{ github.server_url }}/${{ github.repository }}
+          source-ref: ${{ github.ref_name }}
+          source-commit: ${{ github.sha }}
+          image-repository: ${{ steps.image.outputs.image }}
+          image-digest: ${{ steps.image.outputs.digest }}
+          chart-repository: ${{ steps.publish_chart.outputs.repository }}
+          chart-digest: ${{ steps.publish_chart.outputs.digest }}
+          expires-after: ${{ env.DEV_EXPIRES_AFTER }}
+
+      - name: Declare the dev build to the release managers
+        if: ${{ steps.current.outputs.publish_allowed == 'true' }}
+        uses: wireapp/wire-rm-actions/notify-rm@813f008b900b1ad3284502f97cac343d80b1836b
+        with:
+          rm-staging-url: ${{ vars.RM_STAGING_URL }}
+          rm-staging-audience: wire-release-manager-staging
+          rm-prod-url: ${{ vars.RM_PROD_URL }}
+          rm-prod-audience: wire-release-manager-prod
+          component: ${{ env.RM_COMPONENT }}
+          version: ${{ steps.version.outputs.version }}
+          kind: ${{ steps.version.outputs.kind }}
+          repository: ${{ steps.publish_chart.outputs.repository }}
+          digest: ${{ steps.publish_chart.outputs.digest }}
+          release-manifest-file: ${{ steps.manifest.outcome == 'success' && steps.manifest.outputs.manifest || '' }}
