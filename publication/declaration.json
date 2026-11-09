@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "wire.component-release/v1alpha2",
+  "component": "webapp",
+  "version": "0.51.1",
+  "summary": "First 0.51 release through the standard release process: the September production build plus the two fixes of 0.50.1. Nothing to do before upgrading with the default nginx ingress.",
+  "upgrade_from": ">=0.50.0",
+  "changes": [
+    {
+      "kind": "fixed",
+      "description": "Uploads of files with non-ASCII characters in their name are no longer truncated.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/pull/22893"]
+    },
+    {
+      "kind": "fixed",
+      "description": "When this device is removed from the account, the login page says so again instead of sometimes showing no reason.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/pull/22799"]
+    },
+    {
+      "kind": "added",
+      "description": "Shared Drive uploads by drag and drop, of files and folders, with status, retry and cancel; viewer and editor roles.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/e7b3fd62c2...7d827697eb"]
+    },
+    {
+      "kind": "added",
+      "description": "Instant meetings with Meet now, time zone aware recurrence, meeting names kept in sync.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/e7b3fd62c2...7d827697eb"]
+    },
+    {
+      "kind": "changed",
+      "description": "MLS reset system messages, unread messages kept across the migration, read receipts disabled for MLS and mixed conversations.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/e7b3fd62c2...7d827697eb"]
+    },
+    {
+      "kind": "changed",
+      "description": "Client API versions 1 to 17 are supported; meetings need version 17 on the backend.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/e7b3fd62c2...7d827697eb"]
+    },
+    {
+      "kind": "deprecated",
+      "description": "ingress.enabled is replaced by routing.enabled and routing.mode; the old value still works in this release.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/e7b3fd62c2...7d827697eb"]
+    }
+  ],
+  "migrations": [],
+  "configuration": [
+    {
+      "key": "routing.enabled",
+      "change": "added",
+      "required": false,
+      "default": "false",
+      "description": "Renders the HTTP Service and the Ingress or Gateway API resources. Replaces ingress.enabled, which stays as a deprecated alias in this release."
+    },
+    {
+      "key": "routing.mode",
+      "change": "added",
+      "required": false,
+      "default": "nginx",
+      "description": "Controller for web traffic: nginx renders an Ingress, envoy renders a Gateway API HTTPRoute, migration renders both with weighted external-dns records."
+    },
+    {
+      "key": "gateway.name",
+      "change": "added",
+      "required": false,
+      "default": "",
+      "description": "Name of the existing Gateway used when routing.mode is envoy or migration; mandatory in those modes."
+    },
+    {
+      "key": "ingress.enabled",
+      "change": "changed",
+      "required": false,
+      "default": "false",
+      "description": "Deprecated alias of routing.enabled, kept for one release. Move to routing.enabled."
+    }
+  ]
+}
