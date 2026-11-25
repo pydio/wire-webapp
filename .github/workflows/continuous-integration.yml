@@ -441,3 +441,24 @@ jobs:
             echo "Server did not return a successful /version response within 20 seconds." >&2
             exit 1
           '
+
+  publication-files:
+    runs-on: ubuntu-26.04
+    name: Release publication files
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the compatibility file
+        uses: wireapp/wire-rm-actions/compatibility@9ff2112f54a312a66c579f6c815614e736e9791b
+
+      - name: Check the release declaration
+        uses: wireapp/wire-rm-actions/release-declaration@9ff2112f54a312a66c579f6c815614e736e9791b
+        with:
+          file: publication/declaration.json
+          component: webapp

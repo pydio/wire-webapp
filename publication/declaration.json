@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "wire.component-release/v1alpha2",
+  "component": "webapp",
+  "version": "1.3.0",
+  "summary": "Feature release after 1.2.1: opt-in persistent browser logs with structured logging, encrypted PDF previews behind the Edge feature flag, Shared Drive bulk actions without a feature flag, MLS and calling fixes, and the backup export working again. The Helm chart does not change; nothing to do before upgrading.",
+  "upgrade_from": ">=1.2.0",
+  "changes": [
+    {
+      "kind": "added",
+      "description": "Browser logs can be kept on the device: opt-in startup toggle, structured JSON logging with Pino, rotation and retention aligned with Wire Desktop, processing in a dedicated worker.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "added",
+      "description": "Encrypted PDF previews and thumbnails in conversations, behind the Edge feature flag (WPB-29908).",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "added",
+      "description": "Shared Drive bulk actions are no longer behind a feature flag; bulk restore stays behind one; bulk archive download in the API client (WPB-29892, WPB-29920, WPB-29939, WPB-29960).",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "changed",
+      "description": "MLS: epoch recovery when message buffering lasts too long, buffered messages keep their authors, malformed buffered messages are isolated, stale conference joins are retried with backoff.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "changed",
+      "description": "Calls: AVS 10.5.24, the call security line feature is released, no missed-call message when the call was answered on another device, meeting reminders are silent while the status is away.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "changed",
+      "description": "Mark as unread is back, with the manual unread state kept locally.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "changed",
+      "description": "Server: gzip and deflate response compression, the bundled server is the production deployment artifact, Node 26.13.1.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "fixed",
+      "description": "Backup export works again (libsodium-sumo pinned to 0.7.15, WPB-29974).",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    },
+    {
+      "kind": "fixed",
+      "description": "Local data is kept when the local client cannot be loaded; federated E2EI identities are separated by domain and stale X509 key packages are removed on renewal.",
+      "breaking": false,
+      "links": ["https://github.com/wireapp/wire-webapp/compare/v1.2.1...v1.3.0-beta.3"]
+    }
+  ],
+  "migrations": [],
+  "configuration": []
+}
